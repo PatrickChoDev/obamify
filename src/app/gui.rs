@@ -206,6 +206,20 @@ impl App for ObamifyApp {
             self.run_gpu(rs);
 
             if self.gui.animate {
+                let target_mix = if self.color_morph_enabled {
+                    let progress = (self.frame_count as f32
+                        / crate::app::MORPH_DURATION_FRAMES as f32)
+                        .clamp(0.0, 1.0);
+                    let final_target = self.color_morph_target.clamp(0.0, 1.0);
+                    if self.reverse {
+                        final_target * (1.0 - progress)
+                    } else {
+                        progress * final_target
+                    }
+                } else {
+                    self.color_morph_target
+                };
+                self.set_color_mix(&rs.queue, target_mix);
                 if self.gif_recorder.is_recording() {
                     if self.gif_recorder.no_inflight() {
                         if let Err(e) = self.get_color_image_data(device, &rs.queue) {
@@ -220,6 +234,7 @@ impl App for ObamifyApp {
                         Ok(true) => {
                             for _ in 0..(60 / GIF_FRAMERATE) {
                                 self.sim.update(&mut self.seeds, self.size.0);
+                                self.frame_count = self.frame_count.saturating_add(1);
                             }
 
                             self.gif_recorder.frame_count += 1;
@@ -246,6 +261,7 @@ impl App for ObamifyApp {
                     }
                 } else {
                     self.sim.update(&mut self.seeds, self.size.0);
+                    self.frame_count = self.frame_count.saturating_add(1);
                 }
                 rs.queue
                     .write_buffer(&self.seed_buf, 0, bytemuck::cast_slice(&self.seeds));
@@ -325,6 +341,8 @@ impl App for ObamifyApp {
                             ui.horizontal_wrapped(|ui| {
                                 if ui.add(egui::Button::new("play transformation")).clicked() {
                                     self.gui.animate = true;
+                                    self.frame_count = 0;
+                                    self.set_color_mix(&rs.queue, if self.reverse { 1.0 } else { 0.0 });
                                     self.sim.prepare_play(&mut self.seeds, self.reverse);
                                 }
                                 if ui
@@ -332,12 +350,41 @@ impl App for ObamifyApp {
                                     .changed()
                                 {
                                     self.gui.animate = true;
+                                    self.frame_count = 0;
+                                    self.set_color_mix(
+                                        &rs.queue,
+                                        if self.reverse { 1.0 } else { 0.0 },
+                                    );
                                     self.reset_sim(device, &rs.queue);
                                 }
                                 // if ui.button("reload").clicked() {
                                 //     self.reset_sim(device, &rs.queue);
                                 //     self.gui.animate = false;
                                 // }
+                                let mut enabled = self.color_morph_enabled;
+                                if ui.checkbox(&mut enabled, "color morph").changed() {
+                                    self.color_morph_enabled = enabled;
+                                    self.frame_count = 0;
+                                    let base = if enabled {
+                                        if self.reverse { self.color_morph_target } else { 0.0 }
+                                    } else {
+                                        self.color_morph_target
+                                    };
+                                    self.set_color_mix(&rs.queue, base);
+                                }
+                                let mut target = self.color_morph_target;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut target, 0.0..=1.0)
+                                            .text("final color intensity"),
+                                    )
+                                    .changed()
+                                {
+                                    self.color_morph_target = target;
+                                    if !self.color_morph_enabled {
+                                        self.set_color_mix(&rs.queue, self.color_morph_target);
+                                    }
+                                }
                             });
                             ui.separator();
 
@@ -351,10 +398,10 @@ impl App for ObamifyApp {
                             {
                                 self.gif_recorder.status = GifStatus::Recording;
                                 self.gif_recorder.encoder = None;
-                                if let Err(err) = self
-                                    .gif_recorder
-                                    .init_encoder(self.colors.read().unwrap().as_ref())
-                                {
+                                if let Err(err) = self.gif_recorder.init_encoder(
+                                    self.colors.read().unwrap().as_ref(),
+                                    self.target_colors.read().unwrap().as_ref(),
+                                ) {
                                     self.gif_recorder.status = GifStatus::Error(err.to_string());
                                 } else {
                                     self.resize_textures(
@@ -362,10 +409,16 @@ impl App for ObamifyApp {
                                         (GIF_RESOLUTION, GIF_RESOLUTION),
                                         false,
                                     );
+                                    self.frame_count = 0;
+                                    self.set_color_mix(
+                                        &rs.queue,
+                                        if self.reverse { 1.0 } else { 0.0 },
+                                    );
                                     self.reset_sim(device, &rs.queue);
                                     self.gui.animate = true;
                                     for _ in 0..20 {
                                         self.sim.update(&mut self.seeds, self.size.0);
+                                        self.frame_count = self.frame_count.saturating_add(1);
                                     }
                                 }
                             }

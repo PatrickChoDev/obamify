@@ -55,6 +55,14 @@ struct ParamsJfa {
     step: u32,
     _pad: u32,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadeParams {
+    mix: f32,
+    _pad: [f32; 3],
+    _pad2: [f32; 4], // ensure 32-byte layout to match WGSL uniform rules
+}
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_RESOLUTION: u32 = 2048;
 
@@ -66,6 +74,8 @@ pub enum GuiMode {
     #[cfg(not(target_arch = "wasm32"))]
     Draw,
 }
+
+const MORPH_DURATION_FRAMES: u32 = 360; // frames to blend colors fully
 
 use crate::app::{calculate::ProgressMsg, morph_sim::Sim, preset::UnprocessedPreset};
 use crate::app::{calculate::util::GenerationSettings, preset::Preset};
@@ -100,6 +110,7 @@ pub struct ObamifyApp {
     // Seeds CPU copy
     seeds: Vec<SeedPos>,
     colors: Arc<RwLock<Vec<SeedColor>>>,
+    target_colors: Arc<RwLock<Vec<SeedColor>>>,
 
     #[cfg(not(target_arch = "wasm32"))]
     pixeldata: Arc<RwLock<Vec<calculate::drawing_process::PixelData>>>,
@@ -119,6 +130,8 @@ pub struct ObamifyApp {
     seed_tex_view: wgpu::TextureView,
     color_lookup_tex: wgpu::Texture, // Color lookup table as texture (WebGL compatible)
     color_lookup_tex_view: wgpu::TextureView,
+    target_color_lookup_tex: wgpu::Texture,
+    target_color_lookup_tex_view: wgpu::TextureView,
 
     ids_a: wgpu::Texture,
     ids_b: wgpu::Texture,
@@ -128,6 +141,10 @@ pub struct ObamifyApp {
     // Color (linear storage + srgb view for egui - render target)
     color_tex: wgpu::Texture,
     color_view: wgpu::TextureView,
+    shade_params_buf: wgpu::Buffer,
+    color_mix: f32,
+    color_morph_enabled: bool,
+    color_morph_target: f32,
 
     // Pipelines
     clear_pipeline: wgpu::RenderPipeline,
@@ -173,11 +190,13 @@ impl ObamifyApp {
         seed_count: u32,
         seeds: Vec<SeedPos>,
         colors: Vec<SeedColor>,
+        target_colors: Vec<SeedColor>,
         sim: Sim,
     ) {
         self.seed_count = seed_count;
         self.seeds = seeds;
         self.sim = sim;
+        self.frame_count = 0;
 
         // Update GPU buffers
         self.seed_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -215,8 +234,23 @@ impl ObamifyApp {
             Self::make_color_lookup_texture(device, queue, &colors, self.seed_count);
         self.color_lookup_tex = color_lookup_tex;
         self.color_lookup_tex_view = color_lookup_tex_view;
+        let (target_color_lookup_tex, target_color_lookup_tex_view) =
+            Self::make_color_lookup_texture(device, queue, &target_colors, self.seed_count);
+        self.target_color_lookup_tex = target_color_lookup_tex;
+        self.target_color_lookup_tex_view = target_color_lookup_tex_view;
+        let base_mix = if self.color_morph_enabled {
+            if self.reverse {
+                self.color_morph_target
+            } else {
+                0.0
+            }
+        } else {
+            self.color_morph_target
+        };
+        self.set_color_mix(queue, base_mix);
 
         *self.colors.write().unwrap() = colors;
+        *self.target_colors.write().unwrap() = target_colors;
         #[cfg(not(target_arch = "wasm32"))]
         {
             *self.pixeldata.write().unwrap() =
@@ -233,9 +267,10 @@ impl ObamifyApp {
         source: Preset,
         change_index: usize,
     ) {
-        let (seed_count, mut seeds, colors, mut sim) = morph_sim::init_image(self.size.0, source);
+        let (seed_count, mut seeds, colors, target_colors, mut sim) =
+            morph_sim::init_image(self.size.0, source);
         sim.prepare_play(&mut seeds, self.reverse);
-        self.apply_sim_init(device, queue, seed_count, seeds, colors, sim);
+        self.apply_sim_init(device, queue, seed_count, seeds, colors, target_colors, sim);
         self.gui.current_preset = change_index;
     }
 
@@ -246,8 +281,9 @@ impl ObamifyApp {
         queue: &wgpu::Queue,
         source: &UnprocessedPreset,
     ) {
-        let (seed_count, seeds, colors, sim) = morph_sim::init_canvas(self.size.0, source.clone());
-        self.apply_sim_init(device, queue, seed_count, seeds, colors, sim);
+        let (seed_count, seeds, colors, target_colors, sim) =
+            morph_sim::init_canvas(self.size.0, source.clone());
+        self.apply_sim_init(device, queue, seed_count, seeds, colors, target_colors, sim);
     }
 
     pub fn new(cc: &CreationContext<'_>) -> Self {
@@ -282,7 +318,7 @@ impl ObamifyApp {
         )
         .gen_range(0..presets.len() as u64) as usize;
 
-        let (seed_count, seeds, colors, sim) =
+        let (seed_count, seeds, colors, target_colors, sim) =
             morph_sim::init_image(size.0, presets[random_preset].clone());
 
         // === Buffers ===
@@ -303,6 +339,8 @@ impl ObamifyApp {
             Self::make_seed_texture(device, &rs.queue, &seeds, seed_count);
         let (color_lookup_tex, color_lookup_tex_view) =
             Self::make_color_lookup_texture(device, &rs.queue, &colors, seed_count);
+        let (target_color_lookup_tex, target_color_lookup_tex_view) =
+            Self::make_color_lookup_texture(device, &rs.queue, &target_colors, seed_count);
 
         let params_common = ParamsCommon {
             width: size.0,
@@ -325,6 +363,19 @@ impl ObamifyApp {
         let params_jfa_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params_jfa"),
             contents: bytemuck::bytes_of(&params_jfa),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let color_mix = 0.0;
+        let color_morph_target = 0.5;
+        let color_morph_enabled = true;
+        let shade_params = ShadeParams {
+            mix: color_mix,
+            _pad: [0.0; 3],
+            _pad2: [0.0; 4],
+        };
+        let shade_params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("params_shade"),
+            contents: bytemuck::bytes_of(&shade_params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -415,64 +466,89 @@ impl ObamifyApp {
             ],
         });
 
-        let shade_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bgl_shade"),
-            entries: &[
-                // ids texture
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let shade_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bgl_shade"),
+                entries: &[
+                    // ids texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // ids sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                // seed positions texture (WebGL compatible)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    // ids sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
                     },
-                    count: None,
-                },
-                // colors texture (WebGL compatible)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    // seed positions texture (WebGL compatible)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // params common
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(
-                            std::mem::size_of::<ParamsCommon>() as u64
-                        ),
+                    // colors texture (WebGL compatible)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                    // target colors texture (WebGL compatible)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // params common
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<ParamsCommon>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                    // shade params
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: NonZeroU64::new(
+                                std::mem::size_of::<ShadeParams>() as u64
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
 
         // Sampler for texture reads
         let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -740,7 +816,15 @@ impl ObamifyApp {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&target_color_lookup_tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
                     resource: params_common_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: shade_params_buf.as_entire_binding(),
                 },
             ],
         });
@@ -754,6 +838,7 @@ impl ObamifyApp {
 
             seeds,
             colors: Arc::new(RwLock::new(colors)),
+            target_colors: Arc::new(RwLock::new(target_colors)),
             #[cfg(not(target_arch = "wasm32"))]
             pixeldata: Arc::new(RwLock::new(
                 calculate::drawing_process::PixelData::init_canvas(0),
@@ -768,12 +853,18 @@ impl ObamifyApp {
             seed_tex_view,
             color_lookup_tex,
             color_lookup_tex_view,
+            target_color_lookup_tex,
+            target_color_lookup_tex_view,
             ids_a,
             ids_b,
             ids_a_view,
             ids_b_view,
             color_tex,
             color_view,
+            shade_params_buf,
+            color_mix,
+            color_morph_enabled,
+            color_morph_target,
             clear_pipeline,
             seed_splat_pipeline,
             jfa_pipeline,
@@ -1091,6 +1182,20 @@ impl ObamifyApp {
         );
     }
 
+    fn set_color_mix(&mut self, queue: &wgpu::Queue, mix: f32) {
+        let clamped = mix.clamp(0.0, 1.0);
+        if (self.color_mix - clamped).abs() < f32::EPSILON {
+            return;
+        }
+        self.color_mix = clamped;
+        let params = ShadeParams {
+            mix: self.color_mix,
+            _pad: [0.0; 3],
+            _pad2: [0.0; 4],
+        };
+        queue.write_buffer(&self.shade_params_buf, 0, bytemuck::bytes_of(&params));
+    }
+
     fn make_color_lookup_texture(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1257,7 +1362,17 @@ impl ObamifyApp {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.target_color_lookup_tex_view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
                     resource: self.params_common_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.shade_params_buf.as_entire_binding(),
                 },
             ],
         });
@@ -1500,7 +1615,17 @@ impl ObamifyApp {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.target_color_lookup_tex_view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
                         resource: self.params_common_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.shade_params_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -1795,8 +1920,21 @@ macro_rules! include_presets {
                             name: $name.to_owned(),
                             width: img.width(),
                             height: img.height(),
-                            source_img: img.into_raw(),
+                            source_img: img.clone().into_raw(),
                         },
+                        target_img: Some(
+                            image::imageops::resize(
+                                &image::load_from_memory(include_bytes!(
+                                    "app/calculate/target256.png"
+                                ))
+                                .unwrap()
+                                .to_rgb8(),
+                                img.width(),
+                                img.height(),
+                                image::imageops::FilterType::Lanczos3,
+                            )
+                            .into_raw(),
+                        ),
                         assignments: include_str!(concat!("../presets/", $name, "/assignments.json"))
                             .to_string()
                             .strip_prefix('[')
