@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct Preset {
     pub inner: UnprocessedPreset,
     pub assignments: Vec<usize>,
+    #[serde(default)]
+    pub target_img: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

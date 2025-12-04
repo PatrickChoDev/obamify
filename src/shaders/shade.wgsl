@@ -3,9 +3,13 @@
 
 @group(0) @binding(2) var seed_tex: texture_2d<f32>;
 @group(0) @binding(3) var color_tex: texture_2d<f32>;
+@group(0) @binding(4) var target_color_tex: texture_2d<f32>;
 
 struct ParamsCommon { width: u32, height: u32, n_seeds: u32, _pad: u32 };
-@group(0) @binding(4) var<uniform> params: ParamsCommon;
+@group(0) @binding(5) var<uniform> params: ParamsCommon;
+
+struct ShadeParams { mix: f32, _pad: vec3<f32>, };
+@group(0) @binding(6) var<uniform> shade_params: ShadeParams;
 
 fn load_seed_pos(seed_id: u32) -> vec2<f32> {
     let tex_width = 1024u;
@@ -19,6 +23,13 @@ fn load_color(seed_id: u32) -> vec4<f32> {
     let color_x = seed_id % tex_width;
     let color_y = seed_id / tex_width;
     return textureLoad(color_tex, vec2<i32>(i32(color_x), i32(color_y)), 0);
+}
+
+fn load_target_color(seed_id: u32) -> vec4<f32> {
+    let tex_width = 1024u;
+    let color_x = seed_id % tex_width;
+    let color_y = seed_id / tex_width;
+    return textureLoad(target_color_tex, vec2<i32>(i32(color_x), i32(color_y)), 0);
 }
 
 fn decode_id(rgba: vec4<f32>) -> u32 {
@@ -49,11 +60,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   let gid = vec2<i32>(i32(uv.x * f32(params.width)), i32(uv.y * f32(params.height)));
-  
+
   if (gid.x >= i32(params.width) || gid.y >= i32(params.height)) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
-  
+
   let id_rgba = textureLoad(ids, gid, 0);
   let id = decode_id(id_rgba);
   let seed = load_seed_pos(id);
@@ -65,7 +76,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   if (id == 0xfffffffFu) {
     rgba = vec4<f32>(0.0, 0.0, 0.0, 1.0);
   } else {
-    rgba = load_color(id);
+    let src = load_color(id);
+    let dst = load_target_color(id);
+    rgba = mix(src, dst, clamp(shade_params.mix, 0.0, 1.0));
   }
   return rgba;
 }

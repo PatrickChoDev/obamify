@@ -8,16 +8,21 @@ use crate::app::{SeedColor, SeedPos, preset::Preset};
 use crate::app::preset::UnprocessedPreset;
 
 // const DST_FORCE: f32 = 0.2;
-pub fn init_image(sidelen: u32, source: Preset) -> (u32, Vec<SeedPos>, Vec<SeedColor>, Sim) {
-    let imgpath = image::ImageBuffer::from_vec(
-        source.inner.width,
-        source.inner.height,
-        source.inner.source_img,
-    )
-    .unwrap();
+pub fn init_image(
+    sidelen: u32,
+    source: Preset,
+) -> (u32, Vec<SeedPos>, Vec<SeedColor>, Vec<SeedColor>, Sim) {
+    let source_data = source.inner.source_img.clone();
+    let imgpath =
+        image::ImageBuffer::from_vec(source.inner.width, source.inner.height, source_data.clone())
+            .unwrap();
+    let target_img = source.target_img.clone().unwrap_or(source_data);
+    let target_img =
+        image::ImageBuffer::from_vec(source.inner.width, source.inner.height, target_img).unwrap();
     let assignments = source.assignments;
 
     let (seeds, colors, seeds_n) = init_colors(sidelen, imgpath);
+    let target_colors = map_target_colors(&target_img, &assignments, seeds_n);
     let mut sim = Sim::new(source.inner.name);
     sim.cells = vec![CellBody::new(0.0, 0.0, 0.0, 0.0, 0.0); seeds_n];
 
@@ -25,25 +30,27 @@ pub fn init_image(sidelen: u32, source: Preset) -> (u32, Vec<SeedPos>, Vec<SeedC
     for cell in &mut sim.cells {
         cell.dst_force = 0.13;
     }
-    (seeds_n as u32, seeds, colors, sim)
+    (seeds_n as u32, seeds, colors, target_colors, sim)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn init_canvas(
     sidelen: u32,
     source: UnprocessedPreset,
-) -> (u32, Vec<SeedPos>, Vec<SeedColor>, Sim) {
+) -> (u32, Vec<SeedPos>, Vec<SeedColor>, Vec<SeedColor>, Sim) {
     use crate::app::calculate::drawing_process::DRAWING_CANVAS_SIZE;
     let imgpath =
         image::ImageBuffer::from_vec(source.width, source.height, source.source_img).unwrap();
     let assignments = (0..(DRAWING_CANVAS_SIZE * DRAWING_CANVAS_SIZE)).collect::<Vec<usize>>();
 
     let (seeds, colors, seeds_n) = init_colors(sidelen, imgpath);
+    // No target image when drawing; keep target colors identical to source for smooth blending.
+    let target_colors = colors.clone();
     let mut sim = Sim::new(source.name);
     sim.cells = vec![CellBody::new(0.0, 0.0, 0.0, 0.0, 0.0); seeds_n];
 
     sim.set_assignments(assignments, sidelen);
-    (seeds_n as u32, seeds, colors, sim)
+    (seeds_n as u32, seeds, colors, target_colors, sim)
 }
 
 fn init_colors(
@@ -78,6 +85,39 @@ fn init_colors(
         }
     }
     (seeds, colors, seeds_n)
+}
+
+fn map_target_colors(
+    target_img: &ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    assignments: &[usize],
+    seed_count: usize,
+) -> Vec<SeedColor> {
+    let width = target_img.width() as usize;
+    let mut target_colors = vec![
+        SeedColor {
+            rgba: [0.0, 0.0, 0.0, 1.0],
+        };
+        seed_count
+    ];
+
+    for (dst_idx, src_idx) in assignments.iter().enumerate() {
+        if *src_idx >= seed_count {
+            continue;
+        }
+        let x = dst_idx % width;
+        let y = dst_idx / width;
+        let pixel = target_img.get_pixel(x as u32, y as u32);
+        target_colors[*src_idx] = SeedColor {
+            rgba: [
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+                1.0,
+            ],
+        };
+    }
+
+    target_colors
 }
 
 #[derive(Clone, Copy)]

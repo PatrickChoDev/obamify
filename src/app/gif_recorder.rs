@@ -136,15 +136,19 @@ impl GifRecorder {
 
     pub fn init_encoder(
         &mut self,
-        active_colors: &[SeedColor],
+        source_colors: &[SeedColor],
+        target_colors: &[SeedColor],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let colors = active_colors
-            .iter()
-            .flat_map(|s| {
-                s.rgba
-                    .map(|f| (if f == 1.0 { 255.0 } else { f * 256.0 }) as u8)
-            })
-            .collect::<Vec<u8>>();
+        // Build a palette that covers both source and target colors to better match the on-screen blend.
+        let mut colors = Vec::with_capacity((source_colors.len() + target_colors.len()) * 4);
+        colors.extend(source_colors.iter().flat_map(|s| {
+            s.rgba
+                .map(|f| (if f == 1.0 { 255.0 } else { f * 256.0 }) as u8)
+        }));
+        colors.extend(target_colors.iter().flat_map(|s| {
+            s.rgba
+                .map(|f| (if f == 1.0 { 255.0 } else { f * 256.0 }) as u8)
+        }));
         let gif_palette = NeuQuant::new(GIF_PALETTE_SAMPLEFAC, 256, &colors);
         let mut encoder = gif::Encoder::new(
             vec![],

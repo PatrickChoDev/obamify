@@ -124,6 +124,10 @@ pub fn process_optimal<S: ProgressSink>(
     .unwrap();
     // let start_time = std::time::Instant::now();
     let (source_pixels, target_pixels, weights) = util::get_images(source_img, &settings)?;
+    let target_img: Vec<u8> = target_pixels
+        .iter()
+        .flat_map(|(r, g, b)| [*r, *g, *b])
+        .collect();
 
     let weights = ImgDiffWeights {
         source: source_pixels.clone(),
@@ -285,6 +289,7 @@ pub fn process_optimal<S: ProgressSink>(
                 .collect(),
         },
         assignments: assignments.clone(),
+        target_img: Some(target_img.clone()),
     }));
 
     // println!(
@@ -439,6 +444,11 @@ pub fn process_genetic<S: ProgressSink>(
             .iter()
             .map(|p| p.src_y as usize * settings.sidelen as usize + p.src_x as usize)
             .collect::<Vec<_>>();
+
+        let target_img: Vec<u8> = target_pixels
+            .iter()
+            .flat_map(|(r, g, b)| [*r, *g, *b])
+            .collect();
         //debug_print(format!("max_dist = {max_dist}, swaps made = {swaps_made}"));
         if max_dist < 4 && swaps_made < 10 {
             //let dir_name = util::save_result(target, base_name, source, assignments, img)?;
@@ -453,6 +463,7 @@ pub fn process_genetic<S: ProgressSink>(
                         .collect(),
                 },
                 assignments: assignments.clone(),
+                target_img: Some(target_img.clone()),
             }));
             return Ok(());
         }
