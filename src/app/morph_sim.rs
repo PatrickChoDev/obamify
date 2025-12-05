@@ -16,9 +16,23 @@ pub fn init_image(
     let imgpath =
         image::ImageBuffer::from_vec(source.inner.width, source.inner.height, source_data.clone())
             .unwrap();
-    let target_img = source.target_img.clone().unwrap_or(source_data);
-    let target_img =
-        image::ImageBuffer::from_vec(source.inner.width, source.inner.height, target_img).unwrap();
+    let target_img = if let Some(bytes) = source.target_img.clone() {
+        image::ImageBuffer::from_vec(source.inner.width, source.inner.height, bytes).unwrap()
+    } else {
+        // Fallback to the default target image resized to match the source dimensions so color morphing still works.
+        let fallback_bytes: &'static [u8] = if source.inner.width.min(source.inner.height) <= 128 {
+            include_bytes!("calculate/target128.png")
+        } else {
+            include_bytes!("calculate/target256.png")
+        };
+        let fallback = image::load_from_memory(fallback_bytes).unwrap().to_rgb8();
+        image::imageops::resize(
+            &fallback,
+            source.inner.width,
+            source.inner.height,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
     let assignments = source.assignments;
 
     let (seeds, colors, seeds_n) = init_colors(sidelen, imgpath);

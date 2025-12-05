@@ -14,6 +14,9 @@ fn _debug_print(s: String) {
     println!("{}", s);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs, path::Path};
+
 use crate::app::calculate::util::Algorithm;
 use crate::app::{
     calculate::util::{GenerationSettings, ProgressSink},
@@ -278,15 +281,19 @@ pub fn process_optimal<S: ProgressSink>(
 
     //let dir_name = util::save_result(target, "todo".to_string(), source, assignments, img)?;
 
+    let source_bytes: Vec<u8> = source_pixels
+        .iter()
+        .flat_map(|(r, g, b)| [*r, *g, *b])
+        .collect();
+    #[cfg(not(target_arch = "wasm32"))]
+    maybe_write_results(&settings, &assignments, &source_pixels, &target_img);
+
     tx.send(ProgressMsg::Done(Preset {
         inner: UnprocessedPreset {
             name: unprocessed.name,
             width: settings.sidelen,
             height: settings.sidelen,
-            source_img: source_pixels
-                .into_iter()
-                .flat_map(|(r, g, b)| [r, g, b])
-                .collect(),
+            source_img: source_bytes,
         },
         assignments: assignments.clone(),
         target_img: Some(target_img.clone()),
@@ -309,6 +316,63 @@ fn make_new_img(source_pixels: &[(u8, u8, u8)], assignments: &[usize], sidelen: 
         img[base + 2] = b;
     }
     img
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn maybe_write_results(
+    settings: &GenerationSettings,
+    assignments: &[usize],
+    source_pixels: &[(u8, u8, u8)],
+    target_img: &[u8],
+) {
+    if let Ok(dir) = std::env::var("SAVE_ASSIGNMENTS_DIR") {
+        if let Err(err) = write_results(&dir, settings, assignments, source_pixels, target_img) {
+            eprintln!("failed to save assignments to {dir}: {err}");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_results(
+    dir: &str,
+    settings: &GenerationSettings,
+    assignments: &[usize],
+    source_pixels: &[(u8, u8, u8)],
+    target_img: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = Path::new(dir);
+    fs::create_dir_all(path)?;
+    let sidelen = settings.sidelen;
+
+    let source_img: Vec<u8> = source_pixels
+        .iter()
+        .flat_map(|(r, g, b)| [*r, *g, *b])
+        .collect();
+    let output_img = make_new_img(source_pixels, assignments, sidelen);
+
+    let save_rgb = |name: &str, data: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
+        let buf =
+            image::ImageBuffer::<image::Rgb<u8>, _>::from_vec(sidelen, sidelen, data.to_vec())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("failed to build image buffer for {name}"),
+                    )
+                })?;
+        buf.save(path.join(name))?;
+        Ok(())
+    };
+
+    save_rgb("source.png", &source_img)?;
+    save_rgb("target.png", target_img)?;
+    save_rgb("output.png", &output_img)?;
+
+    fs::write(
+        path.join("assignments.json"),
+        serde_json::to_string(assignments)?,
+    )?;
+
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -452,15 +516,18 @@ pub fn process_genetic<S: ProgressSink>(
         //debug_print(format!("max_dist = {max_dist}, swaps made = {swaps_made}"));
         if max_dist < 4 && swaps_made < 10 {
             //let dir_name = util::save_result(target, base_name, source, assignments, img)?;
+            let source_bytes: Vec<u8> = source_pixels
+                .iter()
+                .flat_map(|(r, g, b)| [*r, *g, *b])
+                .collect();
+            #[cfg(not(target_arch = "wasm32"))]
+            maybe_write_results(&settings, &assignments, &source_pixels, &target_img);
             tx.send(ProgressMsg::Done(Preset {
                 inner: UnprocessedPreset {
                     name: unprocessed.name,
                     width: settings.sidelen,
                     height: settings.sidelen,
-                    source_img: source_pixels
-                        .iter()
-                        .flat_map(|(r, g, b)| [*r, *g, *b])
-                        .collect(),
+                    source_img: source_bytes,
                 },
                 assignments: assignments.clone(),
                 target_img: Some(target_img.clone()),

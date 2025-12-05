@@ -1,8 +1,8 @@
-mod calculate;
+pub mod calculate;
 mod gif_recorder;
 mod gui;
 mod morph_sim;
-mod preset;
+pub mod preset;
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::app::calculate::worker::worker_entry;
@@ -1924,9 +1924,11 @@ macro_rules! include_presets {
                         },
                         target_img: Some(
                             image::imageops::resize(
-                                &image::load_from_memory(include_bytes!(
-                                    "app/calculate/target256.png"
-                                ))
+                                &image::load_from_memory(include_bytes!(concat!(
+                                    "../presets/",
+                                    $name,
+                                    "/target.png"
+                                )))
                                 .unwrap()
                                 .to_rgb8(),
                                 img.width(),
@@ -1951,4 +1953,4 @@ macro_rules! include_presets {
     };
 }
 
-include_presets! { "wisetree", "blackhole", "cat", "cat2", "colorful" }
+include_presets! { "wisetree", "blackhole", "cat", "cat2", "colorful", "mountain" }

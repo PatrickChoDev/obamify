@@ -171,9 +171,12 @@ impl GenerationSettings {
         if let Some((w, h, data)) = &self.custom_target {
             image::ImageBuffer::from_vec(*w, *h, data.clone()).unwrap()
         } else {
-            image::load_from_memory(include_bytes!("target256.png"))
-                .unwrap()
-                .to_rgb8()
+            let bytes: &'static [u8] = if self.sidelen <= 128 {
+                include_bytes!("target128.png")
+            } else {
+                include_bytes!("target256.png")
+            };
+            image::load_from_memory(bytes).unwrap().to_rgb8()
         }
     }
 
