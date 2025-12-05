@@ -8,7 +8,7 @@
 struct ParamsCommon { width: u32, height: u32, n_seeds: u32, _pad: u32 };
 @group(0) @binding(5) var<uniform> params: ParamsCommon;
 
-struct ShadeParams { mix: f32, _pad: vec3<f32>, };
+struct ShadeParams { mix: f32, palette_preserve: f32, _pad: vec2<f32>, };
 @group(0) @binding(6) var<uniform> shade_params: ShadeParams;
 
 fn load_seed_pos(seed_id: u32) -> vec2<f32> {
@@ -78,7 +78,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   } else {
     let src = load_color(id);
     let dst = load_target_color(id);
-    rgba = mix(src, dst, clamp(shade_params.mix, 0.0, 1.0));
+    let preserved = mix(dst, src, clamp(shade_params.palette_preserve, 0.0, 1.0));
+    rgba = mix(src, preserved, clamp(shade_params.mix, 0.0, 1.0));
   }
   return rgba;
 }
