@@ -1,8 +1,8 @@
-mod calculate;
+pub mod calculate;
 mod gif_recorder;
 mod gui;
 mod morph_sim;
-mod preset;
+pub mod preset;
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::app::calculate::worker::worker_entry;
@@ -60,8 +60,8 @@ struct ParamsJfa {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadeParams {
     mix: f32,
-    _pad: [f32; 3],
-    _pad2: [f32; 4], // ensure 32-byte layout to match WGSL uniform rules
+    palette_preserve: f32,
+    _pad: [f32; 2], // ensure 16-byte alignment to match WGSL uniform rules
 }
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_RESOLUTION: u32 = 2048;
@@ -143,6 +143,7 @@ pub struct ObamifyApp {
     color_view: wgpu::TextureView,
     shade_params_buf: wgpu::Buffer,
     color_mix: f32,
+    palette_preserve: f32,
     color_morph_enabled: bool,
     color_morph_target: f32,
 
@@ -366,12 +367,13 @@ impl ObamifyApp {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let color_mix = 0.0;
+        let palette_preserve = 0.6;
         let color_morph_target = 0.5;
         let color_morph_enabled = true;
         let shade_params = ShadeParams {
             mix: color_mix,
-            _pad: [0.0; 3],
-            _pad2: [0.0; 4],
+            palette_preserve,
+            _pad: [0.0; 2],
         };
         let shade_params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params_shade"),
@@ -863,6 +865,7 @@ impl ObamifyApp {
             color_view,
             shade_params_buf,
             color_mix,
+            palette_preserve,
             color_morph_enabled,
             color_morph_target,
             clear_pipeline,
@@ -1184,14 +1187,18 @@ impl ObamifyApp {
 
     fn set_color_mix(&mut self, queue: &wgpu::Queue, mix: f32) {
         let clamped = mix.clamp(0.0, 1.0);
-        if (self.color_mix - clamped).abs() < f32::EPSILON {
+        let palette = (1.0 - clamped) * 0.8; // keep more of the source palette when mix is low
+        if (self.color_mix - clamped).abs() < f32::EPSILON
+            && (self.palette_preserve - palette).abs() < f32::EPSILON
+        {
             return;
         }
         self.color_mix = clamped;
+        self.palette_preserve = palette;
         let params = ShadeParams {
             mix: self.color_mix,
-            _pad: [0.0; 3],
-            _pad2: [0.0; 4],
+            palette_preserve: self.palette_preserve,
+            _pad: [0.0; 2],
         };
         queue.write_buffer(&self.shade_params_buf, 0, bytemuck::bytes_of(&params));
     }
@@ -1924,9 +1931,11 @@ macro_rules! include_presets {
                         },
                         target_img: Some(
                             image::imageops::resize(
-                                &image::load_from_memory(include_bytes!(
-                                    "app/calculate/target256.png"
-                                ))
+                                &image::load_from_memory(include_bytes!(concat!(
+                                    "../presets/",
+                                    $name,
+                                    "/target.png"
+                                )))
                                 .unwrap()
                                 .to_rgb8(),
                                 img.width(),
@@ -1951,4 +1960,4 @@ macro_rules! include_presets {
     };
 }
 
-include_presets! { "wisetree", "blackhole", "cat", "cat2", "colorful" }
+include_presets! { "wisetree", "blackhole", "cat", "cat2", "colorful", "mountain" }
